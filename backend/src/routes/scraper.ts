@@ -12,12 +12,16 @@ import {
   startFillCityState,
   cleanBadWebsiteUrls,
   syncScrapedCompanyToCompany,
+  startPlacesEnrich,
+  startWebsiteEmailScrape,
 } from '../controllers/scraperController';
 
 const router = Router();
 
 router.post('/start', startScrape);
 router.post('/rescrape-details', startRescrapeDetails);
+router.post('/places-enrich', startPlacesEnrich);
+router.post('/website-emails', startWebsiteEmailScrape);
 router.post('/fill-city-state', startFillCityState);
 router.post('/clean-bad-websites', cleanBadWebsiteUrls);
 router.get('/stream/:sessionId', streamProgress);

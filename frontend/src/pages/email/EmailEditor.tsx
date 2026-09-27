@@ -6,6 +6,8 @@ import { fetchStats } from '../../services/bulkEmailService';
 import { fetchPersonalInfo } from '../../services/personalInfoService';
 import { generateTemplate } from '../../utils/emailTemplates';
 import { TemplateType } from '../../types/personalInfo';
+import { fetchEmailTemplates } from '../../services/emailTemplateService';
+import { EmailTemplate } from '../../types/emailTemplate';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Attachment {
@@ -228,6 +230,7 @@ export default function EmailEditor() {
   });
   const [templateHtml, setTemplateHtml] = useState<string | null>(null);
   const [templateLabel, setTemplateLabel] = useState<string | null>(null);
+  const [customTemplates, setCustomTemplates] = useState<EmailTemplate[]>([]);
   const [showPreview, setShowPreview] = useState(false);
 
   const updateHistory = (updater: SentEmail[] | ((prev: SentEmail[]) => SentEmail[])) => {
@@ -373,6 +376,7 @@ export default function EmailEditor() {
   // Load DB company stats for header badge
   useEffect(() => {
     fetchStats().then((s) => setDbCompanyCount(s.totalPending)).catch(() => {});
+    fetchEmailTemplates().then(setCustomTemplates).catch(() => {});
   }, []);
 
   // Auto-apply saved template on mount
@@ -393,6 +397,13 @@ export default function EmailEditor() {
     } catch {/* ignore */} finally {
       setShowTemplateMenu(false);
     }
+  };
+
+  const applyCustomTemplate = (t: EmailTemplate) => {
+    setTemplateHtml(t.html);
+    setTemplateLabel(t.name);
+    if (t.subject) setSubject(t.subject);
+    setShowTemplateMenu(false);
   };
 
   return (
@@ -556,20 +567,21 @@ export default function EmailEditor() {
                   <div className="relative">
                     <button
                       onClick={() => setShowTemplateMenu((v) => !v)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/8 border border-white/12 text-slate-300 hover:text-white hover:bg-white/12 transition text-xs font-semibold"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/8 border border-white/12 text-slate-300 hover:text-white hover:bg-white/12 transition text-xs font-semibold max-w-[160px]"
                     >
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
                       </svg>
-                      <span className="capitalize">{activeTemplate}</span>
-                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <span className="capitalize truncate">{templateLabel || activeTemplate}</span>
+                      <svg className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
                       </svg>
                     </button>
                     {showTemplateMenu && (
-                      <div className="absolute right-0 top-full mt-1 z-50 w-52 rounded-xl border border-white/10 bg-slate-900/98 backdrop-blur-xl shadow-2xl overflow-hidden">
+                      <div className="absolute right-0 top-full mt-1 z-50 w-60 rounded-xl border border-white/10 bg-slate-900/98 backdrop-blur-xl shadow-2xl overflow-hidden">
+                        {/* Built-in templates */}
                         <div className="p-1.5 border-b border-white/8">
-                          <p className="text-slate-500 text-[10px] font-bold uppercase tracking-wider px-2 py-1">Apply Template</p>
+                          <p className="text-slate-500 text-[10px] font-bold uppercase tracking-wider px-2 py-1">Built-in Templates</p>
                         </div>
                         {[
                           { type: 'professional' as TemplateType, icon: '💼', label: 'Professional', desc: 'Clean • Indigo • Corporate' },
@@ -578,20 +590,51 @@ export default function EmailEditor() {
                           <button
                             key={t.type}
                             onClick={() => applyTemplate(t.type)}
-                            className={`w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-violet-500/10 transition text-left ${activeTemplate === t.type ? 'bg-violet-500/15' : ''}`}
+                            className={`w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-violet-500/10 transition text-left ${activeTemplate === t.type && !templateLabel ? 'bg-violet-500/15' : ''}`}
                           >
                             <span className="text-base">{t.icon}</span>
-                            <div>
+                            <div className="min-w-0">
                               <p className="text-white text-sm font-semibold">{t.label}</p>
                               <p className="text-slate-500 text-[10px]">{t.desc}</p>
                             </div>
-                            {activeTemplate === t.type && (
-                              <svg className="w-3.5 h-3.5 text-emerald-400 ml-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                              </svg>
-                            )}
                           </button>
                         ))}
+
+                        {/* Custom templates */}
+                        <div className="p-1.5 border-t border-white/8 border-b border-white/8">
+                          <p className="text-slate-500 text-[10px] font-bold uppercase tracking-wider px-2 py-1">My Templates</p>
+                        </div>
+                        {customTemplates.length === 0 ? (
+                          <div className="px-4 py-3 text-slate-600 text-xs text-center">
+                            No custom templates yet.{' '}
+                            <Link to="/templates/builder" onClick={() => setShowTemplateMenu(false)} className="text-violet-400 hover:text-violet-300 underline">
+                              Create one
+                            </Link>
+                          </div>
+                        ) : (
+                          <div className="max-h-48 overflow-y-auto">
+                            {customTemplates.map((t) => (
+                              <button
+                                key={t._id}
+                                onClick={() => applyCustomTemplate(t)}
+                                className={`w-full flex items-center gap-2.5 px-3 py-2.5 hover:bg-violet-500/10 transition text-left ${templateLabel === t.name ? 'bg-violet-500/15' : ''}`}
+                              >
+                                <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500/20 to-cyan-500/20 border border-violet-500/20 flex items-center justify-center text-xs text-violet-400 shrink-0 font-bold">
+                                  {t.name.charAt(0).toUpperCase()}
+                                </span>
+                                <div className="min-w-0">
+                                  <p className="text-white text-sm font-semibold truncate">{t.name}</p>
+                                  <p className="text-slate-500 text-[10px] truncate">{t.subject}</p>
+                                </div>
+                                {templateLabel === t.name && (
+                                  <svg className="w-3.5 h-3.5 text-emerald-400 ml-auto shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                  </svg>
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

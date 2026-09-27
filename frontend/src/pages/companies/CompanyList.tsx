@@ -3,6 +3,8 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Company, CompanyFilters } from '../../types/company';
 import { fetchCompanies, deleteCompany, bulkDeleteCompanies, fetchFilterOptions, importCompanies, toggleCompanyActive, ImportResult, CityOption } from '../../services/companyService';
 import Pagination from '../../components/Pagination';
+import WhatsAppModal from '../../components/WhatsAppModal';
+import BulkWhatsAppModal from '../../components/BulkWhatsAppModal';
 
 type SortKey = 'companyName' | 'city' | 'state' | 'hrEmail' | 'createdAt';
 
@@ -15,6 +17,8 @@ export default function CompanyList() {
   const [allCities, setAllCities] = useState<CityOption[]>([]);
   const [stateOptions, setStateOptions] = useState<string[]>([]);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [whatsAppCompany, setWhatsAppCompany] = useState<Company | null>(null);
+  const [showBulkWhatsApp, setShowBulkWhatsApp] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -328,6 +332,12 @@ export default function CompanyList() {
           </div>
           <div className="h-4 w-px bg-indigo-200" />
           <button
+            onClick={() => setShowBulkWhatsApp(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-500 text-white text-sm font-medium hover:bg-green-600 transition"
+          >
+            WhatsApp
+          </button>
+          <button
             onClick={() => setShowBulkConfirm(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition"
           >
@@ -456,6 +466,14 @@ export default function CompanyList() {
                           >
                             Edit
                           </button>
+                          {(c.contactNumber || c.contactNumber2) && (
+                            <button
+                              onClick={() => setWhatsAppCompany(c)}
+                              className="text-xs px-2 py-1 rounded bg-green-50 hover:bg-green-100 text-green-700"
+                            >
+                              WA
+                            </button>
+                          )}
                           <button
                             onClick={() => setDeleteId(c._id)}
                             className="text-xs px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-600"
@@ -541,6 +559,26 @@ export default function CompanyList() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Bulk WhatsApp Modal */}
+      {showBulkWhatsApp && (
+        <BulkWhatsAppModal
+          companies={companies.filter((c) => selected.has(c._id))}
+          onClose={() => setShowBulkWhatsApp(false)}
+        />
+      )}
+
+      {/* WhatsApp Modal */}
+      {whatsAppCompany && (
+        <WhatsAppModal
+          companyName={whatsAppCompany.companyName}
+          numbers={[
+            whatsAppCompany.contactNumber && { label: 'Contact 1', value: whatsAppCompany.contactNumber },
+            whatsAppCompany.contactNumber2 && { label: 'Contact 2', value: whatsAppCompany.contactNumber2 },
+          ].filter(Boolean) as { label: string; value: string }[]}
+          onClose={() => setWhatsAppCompany(null)}
+        />
       )}
 
       {/* Bulk Delete Confirm Modal */}

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { startScrape, stopScrape, fetchScrapedCompanies, fetchScrapedCompanyFilterOptions, deleteScrapedCompany, bulkDeleteScrapedCompanies, bulkSyncScrapedCompanies, startRescrapeDetails, startFillCityState, cleanBadWebsiteUrls, syncScrapedCompanyToCompany } from '../../services/scraperService';
+import { startScrape, stopScrape, fetchScrapedCompanies, fetchScrapedCompanyFilterOptions, deleteScrapedCompany, bulkDeleteScrapedCompanies, bulkSyncScrapedCompanies, startRescrapeDetails, startFillCityState, cleanBadWebsiteUrls, syncScrapedCompanyToCompany, startPlacesEnrich, startWebsiteEmailScrape } from '../../services/scraperService';
 import { ScrapedCompany, ScrapeStats, LogEntry } from '../../types/scraper';
 
 const DEFAULT_URL =
@@ -276,6 +276,7 @@ export default function ScraperPage() {
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(15);
   const [search, setSearch] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
   const [cityFilter, setCityFilter] = useState('');
@@ -317,6 +318,26 @@ export default function ScraperPage() {
   const fillLogEndRef = useRef<HTMLDivElement>(null);
   const fillEsRef = useRef<EventSource | null>(null);
 
+  // Places enrich state
+  const [enrichMode, setEnrichMode] = useState<'missing' | 'all'>('missing');
+  const [enrichRunning, setEnrichRunning] = useState(false);
+  const [enrichSessionId, setEnrichSessionId] = useState<string | null>(null);
+  const [enrichLogs, setEnrichLogs] = useState<LogEntry[]>([]);
+  const [enrichStats, setEnrichStats] = useState<ScrapeStats>({ pagesScraped: 0, companiesFound: 0, companiesSaved: 0, companiesSkipped: 0, errors: 0 });
+  const [enrichComplete, setEnrichComplete] = useState(false);
+  const enrichLogEndRef = useRef<HTMLDivElement>(null);
+  const enrichEsRef = useRef<EventSource | null>(null);
+
+  // Website email scan state
+  const [emailScanMode, setEmailScanMode] = useState<'missing' | 'all'>('missing');
+  const [emailScanRunning, setEmailScanRunning] = useState(false);
+  const [emailScanSessionId, setEmailScanSessionId] = useState<string | null>(null);
+  const [emailScanLogs, setEmailScanLogs] = useState<LogEntry[]>([]);
+  const [emailScanStats, setEmailScanStats] = useState<ScrapeStats>({ pagesScraped: 0, companiesFound: 0, companiesSaved: 0, companiesSkipped: 0, errors: 0 });
+  const [emailScanComplete, setEmailScanComplete] = useState(false);
+  const emailScanLogEndRef = useRef<HTMLDivElement>(null);
+  const emailScanEsRef = useRef<EventSource | null>(null);
+
   const logEndRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
 
@@ -336,11 +357,19 @@ export default function ScraperPage() {
     fillLogEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [fillLogs]);
 
+  useEffect(() => {
+    enrichLogEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [enrichLogs]);
+
+  useEffect(() => {
+    emailScanLogEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [emailScanLogs]);
+
   const loadCompanies = useCallback(async () => {
     setTableLoading(true);
     try {
       const data = await fetchScrapedCompanies({
-        page, limit: 15,
+        page, limit,
         search: search || undefined,
         sourceWebsite: sourceFilter === 'remote' ? undefined : (sourceFilter || undefined),
         city: cityFilter || undefined,
@@ -352,7 +381,7 @@ export default function ScraperPage() {
       setTotalPages(data.totalPages);
     } catch { /* ignore */ }
     finally { setTableLoading(false); }
-  }, [page, search, sourceFilter, cityFilter, stateFilter]);
+  }, [page, limit, search, sourceFilter, cityFilter, stateFilter]);
 
   useEffect(() => { loadCompanies(); }, [loadCompanies]);
 
@@ -556,6 +585,116 @@ export default function ScraperPage() {
     }
     setFillRunning(false);
     setFillLogs((prev) => [...prev, { message: 'Stopped by user.', type: 'warning', time: new Date().toLocaleTimeString() }]);
+  };
+
+  const handleEnrichStart = async () => {
+    setEnrichLogs([]);
+    setEnrichStats({ pagesScraped: 0, companiesFound: 0, companiesSaved: 0, companiesSkipped: 0, errors: 0 });
+    setEnrichComplete(false);
+    setEnrichRunning(true);
+
+    const addEnrichLog = (entry: Omit<LogEntry, 'time'>) =>
+      setEnrichLogs((prev) => [...prev, { ...entry, time: new Date().toLocaleTimeString() }]);
+
+    try {
+      const { sessionId: sid } = await startPlacesEnrich(enrichMode);
+      setEnrichSessionId(sid);
+
+      const es = new EventSource(`/api/scraper/stream/${sid}`);
+      enrichEsRef.current = es;
+
+      es.addEventListener('connected', () => addEnrichLog({ message: 'Connected — launching browser…', type: 'info' }));
+      es.addEventListener('log', (e) => { const d = JSON.parse(e.data); addEnrichLog({ message: d.message, type: d.type || 'info' }); });
+      es.addEventListener('progress', (e) => { setEnrichStats(JSON.parse(e.data)); });
+      es.addEventListener('complete', (e) => {
+        const d = JSON.parse(e.data);
+        setEnrichStats(d);
+        addEnrichLog({ message: d.message || 'Complete.', type: 'success' });
+        setEnrichComplete(true);
+        setEnrichRunning(false);
+        es.close();
+        enrichEsRef.current = null;
+        loadCompanies();
+      });
+      es.addEventListener('error', (e) => {
+        if ('data' in e) {
+          try { addEnrichLog({ message: `Error: ${JSON.parse((e as MessageEvent).data).message}`, type: 'error' }); }
+          catch { addEnrichLog({ message: 'Stream error.', type: 'error' }); }
+        }
+        setEnrichRunning(false);
+        es.close();
+        enrichEsRef.current = null;
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to start';
+      setEnrichLogs([{ message: msg, type: 'error', time: new Date().toLocaleTimeString() }]);
+      setEnrichRunning(false);
+    }
+  };
+
+  const handleEnrichStop = async () => {
+    if (enrichSessionId) {
+      await stopScrape(enrichSessionId).catch(() => {});
+      enrichEsRef.current?.close();
+      enrichEsRef.current = null;
+    }
+    setEnrichRunning(false);
+    setEnrichLogs((prev) => [...prev, { message: 'Stopped by user.', type: 'warning', time: new Date().toLocaleTimeString() }]);
+  };
+
+  const handleEmailScanStart = async () => {
+    setEmailScanLogs([]);
+    setEmailScanStats({ pagesScraped: 0, companiesFound: 0, companiesSaved: 0, companiesSkipped: 0, errors: 0 });
+    setEmailScanComplete(false);
+    setEmailScanRunning(true);
+
+    const addLog = (entry: Omit<LogEntry, 'time'>) =>
+      setEmailScanLogs((prev) => [...prev, { ...entry, time: new Date().toLocaleTimeString() }]);
+
+    try {
+      const { sessionId: sid } = await startWebsiteEmailScrape(emailScanMode);
+      setEmailScanSessionId(sid);
+
+      const es = new EventSource(`/api/scraper/stream/${sid}`);
+      emailScanEsRef.current = es;
+
+      es.addEventListener('connected', () => addLog({ message: 'Connected — launching browser…', type: 'info' }));
+      es.addEventListener('log', (e) => { const d = JSON.parse(e.data); addLog({ message: d.message, type: d.type || 'info' }); });
+      es.addEventListener('progress', (e) => { setEmailScanStats(JSON.parse(e.data)); });
+      es.addEventListener('complete', (e) => {
+        const d = JSON.parse(e.data);
+        setEmailScanStats(d);
+        addLog({ message: d.message || 'Complete.', type: 'success' });
+        setEmailScanComplete(true);
+        setEmailScanRunning(false);
+        es.close();
+        emailScanEsRef.current = null;
+        loadCompanies();
+      });
+      es.addEventListener('error', (e) => {
+        if ('data' in e) {
+          try { addLog({ message: `Error: ${JSON.parse((e as MessageEvent).data).message}`, type: 'error' }); }
+          catch { addLog({ message: 'Stream error.', type: 'error' }); }
+        }
+        setEmailScanRunning(false);
+        es.close();
+        emailScanEsRef.current = null;
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to start';
+      setEmailScanLogs([{ message: msg, type: 'error', time: new Date().toLocaleTimeString() }]);
+      setEmailScanRunning(false);
+    }
+  };
+
+  const handleEmailScanStop = async () => {
+    if (emailScanSessionId) {
+      await stopScrape(emailScanSessionId).catch(() => {});
+      emailScanEsRef.current?.close();
+      emailScanEsRef.current = null;
+    }
+    setEmailScanRunning(false);
+    setEmailScanLogs((prev) => [...prev, { message: 'Stopped by user.', type: 'warning', time: new Date().toLocaleTimeString() }]);
   };
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
@@ -882,6 +1021,181 @@ export default function ScraperPage() {
         )}
       </div>
 
+      {/* Google Places Enrichment Panel */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="font-semibold text-gray-800">Enrich from Google Places</h2>
+            <p className="text-sm text-gray-500 mt-0.5">
+              For each scraped company, search Google Maps and fetch phone number, address, website &amp; rating — then store back into the database.
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <select
+              value={enrichMode}
+              onChange={(e) => setEnrichMode(e.target.value as 'missing' | 'all')}
+              disabled={enrichRunning}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100"
+            >
+              <option value="missing">Missing phone only</option>
+              <option value="all">All companies (overwrite)</option>
+            </select>
+            {!enrichRunning ? (
+              <button
+                onClick={handleEnrichStart}
+                className="px-4 py-2 bg-teal-600 text-white rounded-lg text-sm font-semibold hover:bg-teal-700 transition flex items-center gap-2 whitespace-nowrap"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Enrich from Maps
+              </button>
+            ) : (
+              <button
+                onClick={handleEnrichStop}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 transition flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+                </svg>
+                Stop
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Stats */}
+        {(enrichRunning || enrichComplete || enrichStats.companiesFound > 0) && (
+          <div className="grid grid-cols-5 gap-3">
+            {[
+              { label: 'Total', value: enrichStats.companiesFound, color: 'bg-blue-50 text-blue-700' },
+              { label: 'Current', value: enrichStats.currentPage ?? 0, color: 'bg-indigo-50 text-indigo-700' },
+              { label: 'Enriched', value: enrichStats.companiesSaved, color: 'bg-green-50 text-green-700' },
+              { label: 'Skipped', value: enrichStats.companiesSkipped, color: 'bg-yellow-50 text-yellow-700' },
+              { label: 'Errors', value: enrichStats.errors, color: 'bg-red-50 text-red-600' },
+            ].map((s) => (
+              <div key={s.label} className={`rounded-lg p-3 text-center ${s.color}`}>
+                <div className="text-2xl font-bold">{s.value}</div>
+                <div className="text-xs font-medium mt-0.5">{s.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Log */}
+        {(enrichRunning || enrichLogs.length > 0) && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Enrich Log</span>
+              {enrichRunning && (
+                <span className="flex items-center gap-1.5 text-xs text-teal-600 font-medium">
+                  <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse" /> Running
+                </span>
+              )}
+              {enrichComplete && <span className="text-xs text-teal-600 font-medium">Complete</span>}
+            </div>
+            <div className="bg-gray-950 rounded-lg p-3 h-52 overflow-y-auto font-mono text-xs space-y-0.5">
+              {enrichLogs.map((log, i) => (
+                <div key={i} className="flex gap-2 leading-relaxed">
+                  <span className="text-gray-600 shrink-0">{log.time}</span>
+                  <span className={LOG_COLORS[log.type] || 'text-gray-300'}>{log.message}</span>
+                </div>
+              ))}
+              {enrichLogs.length === 0 && <span className="text-gray-600">Waiting…</span>}
+              <div ref={enrichLogEndRef} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Website Email Scan Panel */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="font-semibold text-gray-800">Scan Websites for Emails</h2>
+            <p className="text-sm text-gray-500 mt-0.5">
+              For each scraped company with a website, visits the homepage and Contact / About pages to extract email addresses, then saves them to the database.
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <select
+              value={emailScanMode}
+              onChange={(e) => setEmailScanMode(e.target.value as 'missing' | 'all')}
+              disabled={emailScanRunning}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100"
+            >
+              <option value="missing">Missing emails only</option>
+              <option value="all">All companies with website</option>
+            </select>
+            {!emailScanRunning ? (
+              <button
+                onClick={handleEmailScanStart}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition flex items-center gap-2 whitespace-nowrap"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                Scan for Emails
+              </button>
+            ) : (
+              <button
+                onClick={handleEmailScanStop}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 transition flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
+                </svg>
+                Stop
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Stats */}
+        {(emailScanRunning || emailScanComplete || emailScanStats.companiesFound > 0) && (
+          <div className="grid grid-cols-5 gap-3">
+            {[
+              { label: 'Total', value: emailScanStats.companiesFound, color: 'bg-blue-50 text-blue-700' },
+              { label: 'Current', value: emailScanStats.currentPage ?? 0, color: 'bg-indigo-50 text-indigo-700' },
+              { label: 'Updated', value: emailScanStats.companiesSaved, color: 'bg-green-50 text-green-700' },
+              { label: 'No Email', value: emailScanStats.companiesSkipped, color: 'bg-yellow-50 text-yellow-700' },
+              { label: 'Errors', value: emailScanStats.errors, color: 'bg-red-50 text-red-600' },
+            ].map((s) => (
+              <div key={s.label} className={`rounded-lg p-3 text-center ${s.color}`}>
+                <div className="text-2xl font-bold">{s.value}</div>
+                <div className="text-xs font-medium mt-0.5">{s.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Log */}
+        {(emailScanRunning || emailScanLogs.length > 0) && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Email Scan Log</span>
+              {emailScanRunning && (
+                <span className="flex items-center gap-1.5 text-xs text-blue-600 font-medium">
+                  <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" /> Running
+                </span>
+              )}
+              {emailScanComplete && <span className="text-xs text-blue-600 font-medium">Complete</span>}
+            </div>
+            <div className="bg-gray-950 rounded-lg p-3 h-52 overflow-y-auto font-mono text-xs space-y-0.5">
+              {emailScanLogs.map((log, i) => (
+                <div key={i} className="flex gap-2 leading-relaxed">
+                  <span className="text-gray-600 shrink-0">{log.time}</span>
+                  <span className={LOG_COLORS[log.type] || 'text-gray-300'}>{log.message}</span>
+                </div>
+              ))}
+              {emailScanLogs.length === 0 && <span className="text-gray-600">Waiting…</span>}
+              <div ref={emailScanLogEndRef} />
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Scraped Companies Table */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
         <div className="p-5 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
@@ -1143,9 +1457,22 @@ export default function ScraperPage() {
         </div>
 
         {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="px-5 py-4 border-t border-gray-100 flex items-center justify-between text-sm text-gray-600">
-            <span>Page {page} of {totalPages} ({total} records)</span>
+        {(totalPages > 1 || total > 0) && (
+          <div className="px-5 py-4 border-t border-gray-100 flex items-center justify-between text-sm text-gray-600 gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span>Page {page} of {totalPages} ({total} records)</span>
+              <span className="text-gray-300">|</span>
+              <label className="text-xs text-gray-500">Rows:</label>
+              <select
+                value={limit}
+                onChange={(e) => { setLimit(Number(e.target.value)); setPage(1); }}
+                className="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {[15, 25, 50, 100].map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
             <div className="flex gap-1">
               <button
                 onClick={() => setPage((p) => Math.max(1, p - 1))}

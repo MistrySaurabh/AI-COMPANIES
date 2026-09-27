@@ -15,6 +15,7 @@ import bounceRoutes from './routes/bounce';
 import scraperRoutes from './routes/scraper';
 import placesRoutes from './routes/places';
 import backupRoutes from './routes/backup';
+import emailTemplateRoutes from './routes/emailTemplates';
 
 dotenv.config();
 
@@ -39,6 +40,7 @@ app.use('/api/bounce', bounceRoutes);
 app.use('/api/scraper', scraperRoutes);
 app.use('/api/places', placesRoutes);
 app.use('/api/backup', backupRoutes);
+app.use('/api/email-templates', emailTemplateRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });

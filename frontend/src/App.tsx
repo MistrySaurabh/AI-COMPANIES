@@ -20,6 +20,8 @@ import RoleEdit from './pages/roles/RoleEdit';
 import EmailSettings from './pages/settings/EmailSettings';
 import PersonalInfo from './pages/settings/PersonalInfo';
 import EmailTemplates from './pages/templates/EmailTemplates';
+import EmailTemplateList from './pages/templates/EmailTemplateList';
+import EmailTemplateBuilder from './pages/templates/EmailTemplateBuilder';
 import EmailLogs from './pages/email/EmailLogs';
 import ScraperPage from './pages/scraper/ScraperPage';
 import GooglePlacesPage from './pages/places/GooglePlacesPage';
@@ -35,6 +37,10 @@ export default function App() {
 
           {/* Email — full-bleed, no inner padding */}
           <Route path="/email" element={<EmailEditor />} />
+
+          {/* Template Builder — full-bleed, full height */}
+          <Route path="/templates/builder" element={<EmailTemplateBuilder />} />
+          <Route path="/templates/builder/:id" element={<EmailTemplateBuilder />} />
 
           {/* Standard padded layout */}
           <Route path="/*" element={
@@ -59,6 +65,7 @@ export default function App() {
                 <Route path="/settings/email" element={<EmailSettings />} />
                 <Route path="/settings/personal-info" element={<PersonalInfo />} />
                 <Route path="/templates" element={<EmailTemplates />} />
+                <Route path="/templates/custom" element={<EmailTemplateList />} />
                 <Route path="/email-logs" element={<EmailLogs />} />
                 <Route path="/scraper" element={<ScraperPage />} />
                 <Route path="/places" element={<GooglePlacesPage />} />

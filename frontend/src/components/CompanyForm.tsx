@@ -21,13 +21,18 @@ const empty: CompanyFormData = {
   state: '',
 };
 
+const toForm = (data?: Record<string, unknown>): CompanyFormData =>
+  Object.fromEntries(
+    Object.keys(empty).map((k) => [k, (data?.[k] ?? '') as string])
+  ) as CompanyFormData;
+
 export default function CompanyForm({ initialData, onSubmit, onCancel, submitLabel = 'Save' }: CompanyFormProps) {
-  const [form, setForm] = useState<CompanyFormData>({ ...empty, ...initialData });
+  const [form, setForm] = useState<CompanyFormData>(toForm(initialData));
   const [errors, setErrors] = useState<Partial<CompanyFormData>>({});
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setForm({ ...empty, ...initialData });
+    setForm(toForm(initialData));
   }, [initialData]);
 
   const validate = (): boolean => {

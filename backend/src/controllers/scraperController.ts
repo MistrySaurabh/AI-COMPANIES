@@ -3,6 +3,7 @@ import puppeteer, { Browser, Page } from 'puppeteer';
 import ScrapedCompany from '../models/ScrapedCompany';
 import Company from '../models/Company';
 import City from '../models/City';
+import { scrapeEmailsFromSite } from './placesController';
 
 // ─── Stealth browser for Cloudflare-protected sites (Glassdoor) ──────────────
 
@@ -2581,4 +2582,398 @@ export const bulkDeleteScrapedCompanies = async (req: Request, res: Response) =>
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: msg });
   }
+};
+
+// ─── Google Places Enrichment ────────────────────────────────────────────────
+
+function mapsCategory(category: string | null): string | null {
+  if (!category) return null;
+  const l = category.toLowerCase();
+  if (l.includes('software') || l.includes('technology') || l.includes('tech') || l.includes('it ')) return 'Information Technology';
+  if (l.includes('bank') || l.includes('financ')) return 'Banking & Finance';
+  if (l.includes('hospital') || l.includes('clinic') || l.includes('health') || l.includes('medical')) return 'Healthcare';
+  if (l.includes('school') || l.includes('college') || l.includes('university') || l.includes('education')) return 'Education';
+  if (l.includes('restaurant') || l.includes('food') || l.includes('cafe')) return 'Food & Beverage';
+  if (l.includes('hotel') || l.includes('resort') || l.includes('lodge')) return 'Hospitality';
+  if (l.includes('construction') || l.includes('builder') || l.includes('contractor')) return 'Construction';
+  if (l.includes('retail') || l.includes('shop') || l.includes('store')) return 'Retail';
+  if (l.includes('transport') || l.includes('logistic') || l.includes('shipping')) return 'Logistics';
+  if (l.includes('legal') || l.includes('law ') || l.includes('attorney') || l.includes('advocate')) return 'Legal';
+  if (l.includes('real estate') || l.includes('property') || l.includes('realty')) return 'Real Estate';
+  if (l.includes('manufactur') || l.includes('factory')) return 'Manufacturing';
+  if (l.includes('consult')) return 'Consulting';
+  if (l.includes('insurance')) return 'Insurance';
+  if (l.includes('media') || l.includes('advertis') || l.includes('marketing')) return 'Media & Marketing';
+  return category;
+}
+
+async function searchAndExtractMapsDetail(page: Page, companyName: string, city?: string): Promise<{
+  phone: string | null;
+  address: string | null;
+  website: string | null;
+  rating: number | null;
+  category: string | null;
+} | null> {
+  const query = city ? `${companyName} ${city}` : companyName;
+  const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+
+  await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+
+  // Dismiss consent/cookie dialog
+  await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll<HTMLButtonElement>('button, [role="button"]'));
+    const accept = ['accept all', 'accept', 'agree', 'i agree', 'ok', 'got it', 'no thanks'];
+    for (const btn of btns) {
+      const t = btn.textContent?.toLowerCase().trim() || '';
+      if (accept.some((k) => t === k) && (btn.closest('[role="dialog"]') || btn.closest('form'))) {
+        btn.click();
+        break;
+      }
+    }
+  }).catch(() => {});
+
+  await sleep(2000);
+
+  // If a single result: Google Maps might show the detail panel directly (no feed)
+  const hasFeed = await page.$('div[role="feed"]').then((el) => !!el).catch(() => false);
+
+  if (hasFeed) {
+    // Click the first result in the list
+    const firstLink = await page.$('div[role="feed"] a[href*="/maps/place/"]');
+    if (!firstLink) return null;
+    await firstLink.click();
+    await sleep(2500);
+  }
+  // Otherwise already on detail view
+
+  await page.waitForSelector('h1', { timeout: 10000 }).catch(() => {});
+  await sleep(800);
+
+  return page.evaluate(() => {
+    const name = document.querySelector('h1')?.textContent?.trim() || '';
+    if (!name) return null;
+
+    // Address
+    const addrBtn = document.querySelector('button[data-item-id="address"]');
+    const address =
+      addrBtn?.getAttribute('aria-label')?.replace(/^Address:\s*/i, '').trim() ||
+      Array.from(addrBtn?.querySelectorAll('span') ?? []).map((s) => s.textContent?.trim()).filter(Boolean).join(', ') ||
+      null;
+
+    // Phone
+    const phoneBtn = document.querySelector('button[data-item-id*="phone"]');
+    const rawPhone =
+      phoneBtn?.getAttribute('aria-label')?.replace(/^Phone:\s*/i, '').trim() ||
+      Array.from(phoneBtn?.querySelectorAll('span') ?? [])
+        .find((s) => /^\+?[\d\s\-()+]+$/.test(s.textContent?.trim() || ''))
+        ?.textContent?.trim() ||
+      null;
+    const phone = rawPhone && rawPhone.length > 4 ? rawPhone : null;
+
+    // Website
+    const websiteAnchor = document.querySelector('a[data-item-id="authority"]') as HTMLAnchorElement | null;
+    const website = websiteAnchor?.href?.trim() || null;
+
+    // Rating
+    const ratingEl = document.querySelector('span.MW4etd') || document.querySelector('[class*="fontDisplayLarge"]');
+    const ratingText = ratingEl?.textContent?.trim() || null;
+
+    // Category
+    const category = document.querySelector('button.DkEaL')?.textContent?.trim() || null;
+
+    return { address: address || null, phone, website, ratingText, category };
+  }).then((d) => {
+    if (!d) return null;
+    const ratingNum = d.ratingText ? parseFloat(d.ratingText) : null;
+    return {
+      phone: d.phone,
+      address: d.address,
+      website: d.website,
+      rating: ratingNum && !isNaN(ratingNum) ? ratingNum : null,
+      category: d.category,
+    };
+  }).catch(() => null);
+}
+
+async function runPlacesEnrich(sessionId: string, mode: 'missing' | 'all'): Promise<void> {
+  await sleep(800); // give the frontend time to subscribe to the SSE stream
+
+  let browser: Browser | null = null;
+  try {
+    // Build filter
+    const filter = mode === 'missing'
+      ? {
+          $or: [
+            { contactNumbers: { $exists: true, $size: 0 } },
+            { contactNumbers: { $exists: false } },
+            { contactNumbers: null },
+          ],
+        }
+      : {};
+
+    const companies = await ScrapedCompany.find(filter)
+      .select('_id companyName city website contactNumbers address rating industry')
+      .lean();
+
+    const total = companies.length;
+
+    await sendSSE(sessionId, 'log', { message: `Found ${total} companies to enrich via Google Maps.`, type: 'info' });
+
+    if (total === 0) {
+      await sendSSE(sessionId, 'complete', {
+        pagesScraped: 0, companiesFound: 0, companiesSaved: 0, companiesSkipped: 0, errors: 0,
+        message: 'No companies to enrich.',
+      });
+      return;
+    }
+
+    browser = await puppeteerExtra.launch({
+      headless: false,
+      args: [...STEALTH_ARGS, '--window-position=0,0'],
+    }) as Browser;
+
+    const page = await browser.newPage();
+
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
+      else req.continue();
+    });
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    await page.setViewport({ width: 1366, height: 768 });
+
+    const stats: ScrapeStats = {
+      pagesScraped: 0,
+      companiesFound: total,
+      companiesSaved: 0,
+      companiesSkipped: 0,
+      errors: 0,
+    };
+
+    await sendSSE(sessionId, 'progress', stats);
+
+    for (let i = 0; i < companies.length; i++) {
+      const session = activeSessions.get(sessionId);
+      if (!session?.isRunning) {
+        await sendSSE(sessionId, 'log', { message: 'Stopped by user.', type: 'warning' });
+        break;
+      }
+
+      const company = companies[i] as Record<string, unknown>;
+      const name = company.companyName as string;
+      const city = (company.city as string | undefined) || undefined;
+
+      stats.currentPage = i + 1;
+      await sendSSE(sessionId, 'progress', stats);
+      await sendSSE(sessionId, 'log', { message: `[${i + 1}/${total}] Searching Google Maps: ${name}`, type: 'info' });
+
+      try {
+        const result = await searchAndExtractMapsDetail(page, name, city);
+
+        if (!result) {
+          stats.companiesSkipped++;
+          await sendSSE(sessionId, 'log', { message: `  ↷ No Google Maps result for: ${name}`, type: 'warning' });
+        } else {
+          const currentPhones = (company.contactNumbers as string[] | undefined) ?? [];
+          const currentWebsite = (company.website as string | undefined) ?? '';
+          const currentAddress = (company.address as string | undefined) ?? '';
+          const currentRating = company.rating as number | undefined;
+          const currentIndustry = (company.industry as string | undefined) ?? '';
+
+          const update: Record<string, unknown> = {};
+          if (result.phone && currentPhones.length === 0) update.contactNumbers = [result.phone];
+          if (result.website && !currentWebsite) update.website = result.website;
+          if (result.address && !currentAddress) update.address = result.address;
+          if (result.rating !== null && !currentRating) update.rating = result.rating;
+          if (result.category && !currentIndustry) {
+            const domain = mapsCategory(result.category);
+            if (domain) update.industry = domain;
+          }
+
+          if (Object.keys(update).length > 0) {
+            await ScrapedCompany.findByIdAndUpdate(company._id, { $set: update });
+            stats.companiesSaved++;
+            const fields = Object.keys(update).join(', ');
+            await sendSSE(sessionId, 'log', { message: `  ✓ ${name} — updated [${fields}]`, type: 'success' });
+          } else {
+            stats.companiesSkipped++;
+            await sendSSE(sessionId, 'log', { message: `  ↷ ${name} — no new data found`, type: 'skip' });
+          }
+        }
+      } catch (err) {
+        stats.errors++;
+        await sendSSE(sessionId, 'log', {
+          message: `  ✗ ${name}: ${err instanceof Error ? err.message : 'unknown error'}`,
+          type: 'error',
+        });
+      }
+
+      await sendSSE(sessionId, 'progress', stats);
+      if (i < companies.length - 1) await sleep(1500);
+    }
+
+    await sendSSE(sessionId, 'complete', {
+      ...stats,
+      message: `Done: ${stats.companiesSaved} enriched, ${stats.companiesSkipped} skipped, ${stats.errors} errors.`,
+    });
+
+  } catch (err) {
+    await sendSSE(sessionId, 'error', {
+      message: err instanceof Error ? err.message : 'Places enrichment failed',
+    });
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+    const session = activeSessions.get(sessionId);
+    if (session) {
+      session.isRunning = false;
+      if (!session.res.writableEnded) session.res.end();
+    }
+    setTimeout(() => activeSessions.delete(sessionId), 60_000);
+  }
+}
+
+export const startPlacesEnrich = async (req: Request, res: Response): Promise<void> => {
+  const { mode = 'missing' } = req.body as { mode?: 'missing' | 'all' };
+  const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  res.json({ sessionId });
+  runPlacesEnrich(sessionId, mode).catch((e) => console.error('Places enrich fatal error:', e));
+};
+
+// ─── Website Email Scrape for Scraped Companies ───────────────────────────────
+
+const HR_KEYWORDS = /\b(hr|career|recruit|talent|hiring|people|jobs)\b/i;
+
+async function runWebsiteEmailScrape(sessionId: string, mode: 'missing' | 'all'): Promise<void> {
+  await sleep(800);
+
+  let browser: Browser | null = null;
+  try {
+    // mode=missing: companies that have a website but no emails yet
+    const filter: Record<string, unknown> = {
+      website: { $exists: true, $ne: '' },
+    };
+    if (mode === 'missing') {
+      filter.$or = [
+        { emails: { $exists: true, $size: 0 } },
+        { emails: { $exists: false } },
+        { emails: null },
+      ];
+    }
+
+    const companies = await ScrapedCompany.find(filter)
+      .select('_id companyName website emails address')
+      .lean();
+
+    const total = companies.length;
+
+    await sendSSE(sessionId, 'log', {
+      message: `Found ${total} companies with a website to scan for emails.`,
+      type: 'info',
+    });
+
+    if (total === 0) {
+      await sendSSE(sessionId, 'complete', {
+        pagesScraped: 0, companiesFound: 0, companiesSaved: 0, companiesSkipped: 0, errors: 0,
+        message: 'No companies to scan.',
+      });
+      return;
+    }
+
+    browser = await puppeteerExtra.launch({
+      headless: true,
+      args: STEALTH_ARGS,
+    }) as Browser;
+
+    const stats: ScrapeStats = {
+      pagesScraped: 0,
+      companiesFound: total,
+      companiesSaved: 0,
+      companiesSkipped: 0,
+      errors: 0,
+    };
+
+    await sendSSE(sessionId, 'progress', stats);
+
+    for (let i = 0; i < companies.length; i++) {
+      const session = activeSessions.get(sessionId);
+      if (!session?.isRunning) {
+        await sendSSE(sessionId, 'log', { message: 'Stopped by user.', type: 'warning' });
+        break;
+      }
+
+      const company = companies[i] as Record<string, unknown>;
+      const name = company.companyName as string;
+      const website = company.website as string;
+
+      stats.currentPage = i + 1;
+      await sendSSE(sessionId, 'progress', stats);
+      await sendSSE(sessionId, 'log', {
+        message: `[${i + 1}/${total}] Scanning: ${name} — ${website}`,
+        type: 'info',
+      });
+
+      try {
+        const { emails, address } = await scrapeEmailsFromSite(browser, website);
+
+        const update: Record<string, unknown> = {};
+
+        if (emails.length > 0) {
+          update.emails = emails;
+        }
+
+        const currentAddress = (company.address as string | undefined) ?? '';
+        if (address && !currentAddress) {
+          update.address = address;
+        }
+
+        if (Object.keys(update).length > 0) {
+          await ScrapedCompany.findByIdAndUpdate(company._id, { $set: update });
+          stats.companiesSaved++;
+
+          const hrEmail = emails.find((e) => HR_KEYWORDS.test(e.split('@')[0])) || null;
+          const summary = emails.length > 0
+            ? `${emails.length} email(s) found${hrEmail ? ` · HR: ${hrEmail}` : ''}`
+            : 'address updated';
+          await sendSSE(sessionId, 'log', { message: `  ✓ ${name} — ${summary}`, type: 'success' });
+        } else {
+          stats.companiesSkipped++;
+          await sendSSE(sessionId, 'log', { message: `  ↷ ${name} — no emails found`, type: 'warning' });
+        }
+      } catch (err) {
+        stats.errors++;
+        await sendSSE(sessionId, 'log', {
+          message: `  ✗ ${name}: ${err instanceof Error ? err.message : 'unknown error'}`,
+          type: 'error',
+        });
+      }
+
+      await sendSSE(sessionId, 'progress', stats);
+      if (i < companies.length - 1) await sleep(1000);
+    }
+
+    await sendSSE(sessionId, 'complete', {
+      ...stats,
+      message: `Done: ${stats.companiesSaved} updated, ${stats.companiesSkipped} skipped, ${stats.errors} errors.`,
+    });
+
+  } catch (err) {
+    await sendSSE(sessionId, 'error', {
+      message: err instanceof Error ? err.message : 'Website email scan failed',
+    });
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+    const session = activeSessions.get(sessionId);
+    if (session) {
+      session.isRunning = false;
+      if (!session.res.writableEnded) session.res.end();
+    }
+    setTimeout(() => activeSessions.delete(sessionId), 60_000);
+  }
+}
+
+export const startWebsiteEmailScrape = async (req: Request, res: Response): Promise<void> => {
+  const { mode = 'missing' } = req.body as { mode?: 'missing' | 'all' };
+  const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  res.json({ sessionId });
+  runWebsiteEmailScrape(sessionId, mode).catch((e) => console.error('Website email scrape fatal error:', e));
 };

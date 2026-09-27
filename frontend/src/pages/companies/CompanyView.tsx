@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Company } from '../../types/company';
 import { fetchCompany } from '../../services/companyService';
+import WhatsAppModal from '../../components/WhatsAppModal';
 
 export default function CompanyView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [company, setCompany] = useState<Company | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showWhatsApp, setShowWhatsApp] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -18,6 +20,11 @@ export default function CompanyView() {
 
   if (loading) return <div className="text-center py-20 text-gray-400">Loading…</div>;
   if (!company) return <div className="text-center py-20 text-gray-400">Company not found</div>;
+
+  const waNumbers = [
+    company.contactNumber && { label: 'Contact 1', value: company.contactNumber },
+    company.contactNumber2 && { label: 'Contact 2', value: company.contactNumber2 },
+  ].filter(Boolean) as { label: string; value: string }[];
 
   const row = (label: string, value: React.ReactNode) => (
     <div className="py-3 sm:grid sm:grid-cols-3 sm:gap-4 border-b border-gray-100 last:border-0">
@@ -35,12 +42,22 @@ export default function CompanyView() {
           </button>
           <h1 className="text-2xl font-bold text-gray-800">{company.companyName}</h1>
         </div>
-        <Link
-          to={`/companies/${company._id}/edit`}
-          className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm hover:bg-indigo-700"
-        >
-          Edit
-        </Link>
+        <div className="flex gap-2">
+          {waNumbers.length > 0 && (
+            <button
+              onClick={() => setShowWhatsApp(true)}
+              className="bg-green-500 text-white px-4 py-2 rounded-md text-sm hover:bg-green-600"
+            >
+              WhatsApp
+            </button>
+          )}
+          <Link
+            to={`/companies/${company._id}/edit`}
+            className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm hover:bg-indigo-700"
+          >
+            Edit
+          </Link>
+        </div>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -63,6 +80,14 @@ export default function CompanyView() {
           {row('Updated', new Date(company.updatedAt).toLocaleString())}
         </dl>
       </div>
+
+      {showWhatsApp && waNumbers.length > 0 && (
+        <WhatsAppModal
+          companyName={company.companyName}
+          numbers={waNumbers}
+          onClose={() => setShowWhatsApp(false)}
+        />
+      )}
     </div>
   );
 }

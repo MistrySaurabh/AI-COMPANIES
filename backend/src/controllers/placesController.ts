@@ -453,7 +453,7 @@ async function extractAddressFromPage(page: import('puppeteer').Page): Promise<s
   }).catch(() => null);
 }
 
-async function scrapeEmailsFromSite(
+export async function scrapeEmailsFromSite(
   browser: Browser,
   website: string
 ): Promise<{ emails: string[]; address: string | null }> {

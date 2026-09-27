@@ -15,6 +15,12 @@ export const startRescrapeDetails = (mode: 'missing' | 'all') =>
 export const startFillCityState = () =>
   axios.post<{ sessionId: string }>(`${BASE}/fill-city-state`).then((r) => r.data);
 
+export const startPlacesEnrich = (mode: 'missing' | 'all') =>
+  axios.post<{ sessionId: string }>(`${BASE}/places-enrich`, { mode }).then((r) => r.data);
+
+export const startWebsiteEmailScrape = (mode: 'missing' | 'all') =>
+  axios.post<{ sessionId: string }>(`${BASE}/website-emails`, { mode }).then((r) => r.data);
+
 export const cleanBadWebsiteUrls = () =>
   axios.post<{ updated: number }>(`${BASE}/clean-bad-websites`).then((r) => r.data);
 
